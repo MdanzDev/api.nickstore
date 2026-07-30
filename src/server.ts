@@ -30,6 +30,26 @@ app.use(
   })
 );
 
+// --- Request Logger (added) ---
+app.use("*", async (c, next) => {
+  const start = Date.now();
+  const ip =
+    c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ||
+    c.req.raw.socket?.remoteAddress ||
+    "unknown";
+
+  await next();
+
+  const ms = Date.now() - start;
+  const status = c.res.status;
+  const method = c.req.method;
+  const url = c.req.url;
+
+  console.log(
+    `[${new Date().toISOString()}] ${method} ${url} - ${status} - ${ms}ms - ${ip}`
+  );
+});
+
 // --- Health Check ---
 app.get("/health", (c) =>
   c.json({
