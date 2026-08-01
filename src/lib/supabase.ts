@@ -7,7 +7,7 @@ export function getSupabase() {
   if (_client) return _client;
 
   const supabaseUrl = process.env.SUPABASE_URL || "https://ldfodgqlwwxjggrhypmq.supabase.co";
-  const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || "sb_secret_TJssQv-PVmmFJhIJqolUHQ_NR_kI-B0";
+  const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || "sb_secret_r2R_I2_oo_WmuaSGi3nPXQ__fBYnjjI";
 
   if (!supabaseKey) {
     console.warn("[Supabase] SUPABASE_SERVICE_ROLE_KEY not set — using empty key");
