@@ -74,7 +74,7 @@ botApiRouter.use("*", async (c, next) => {
 // 1. GET /products
 botApiRouter.get("/products", async (c) => {
   try {
-    const data = await fetchKryzNetV2<any>("/games").catch(() => null);
+    const data = await fetchKryzNetV2<any>("/games");
     const products = (data?.games || []).map((g: any) => ({
       id: g.slug,
       name: g.name,
@@ -88,6 +88,7 @@ botApiRouter.get("/products", async (c) => {
     return c.json({ success: true, products });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Unknown error";
+    console.error("[products] Failed:", message);
     return c.json({ success: false, error: message }, 500);
   }
 });
