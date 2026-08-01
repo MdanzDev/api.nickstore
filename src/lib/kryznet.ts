@@ -2,7 +2,7 @@ export const getKryzNetApiUrl = () =>
   process.env.EXTERNAL_API_URL || "https://api.kryz-net.space";
 
 export const getKryzNetApiKey = () =>
-  process.env.EXTERNAL_API_KEY || "kryz_live_aedfce4fe13c90efaa32c5f05aecb07e8b20bb30b5da03d48b1bbf0afe1eb3e6";
+  process.env.EXTERNAL_API_KEY || "kryz_live_1512e253c2259c2369d64630e5cb7ab3cb509882";
 
 export const getBotSecret = () =>
   process.env.BOT_SECRET || "nickstore_secret_bot_key_2026";
