@@ -1,7 +1,7 @@
 import { Hono, type Context } from "hono";
 import crypto from "crypto";
 import { getSupabase } from "../lib/supabase.js";
-import { getKryzNetApiUrl, getKryzNetApiKey, getBotSecret } from "../lib/kryznet.js";
+import { getKryzNetApiUrl, getKryzNetApiKey, getBotSecret, getAdminSecret, fetchKryzNetV2 } from "../lib/kryznet.js";
 
 export const botApiRouter = new Hono();
 
@@ -9,22 +9,20 @@ export const botApiRouter = new Hono();
 botApiRouter.use("*", async (c, next) => {
   const path = c.req.path;
   const botSecret = getBotSecret();
+  const adminSecret = getAdminSecret();
 
-  // Public endpoints that do not require bot HMAC authentication
   if (path.includes("/products") || path.includes("/auth") || path.includes("/cron")) {
     return next();
   }
 
-  // Admin routes authentication check (/api/admin/*)
   if (path.includes("/admin")) {
     const authHeader = c.req.header("authorization") || c.req.header("Authorization");
-    const adminToken = c.req.header("x-admin-token") || c.req.header("X-Admin-Token") || c.req.header("x-bot-secret") || c.req.header("X-Bot-Secret");
     const bearerToken = authHeader?.startsWith("Bearer ") ? authHeader.substring(7) : null;
-    const token = bearerToken || adminToken;
+    const token = bearerToken || c.req.header("x-admin-token") || c.req.header("X-Admin-Token");
 
+    if (adminSecret && token === adminSecret) return next();
     if (token === botSecret) return next();
 
-    // Check HMAC headers for admin
     const botId = c.req.header("x-bot-id") || c.req.header("X-Bot-ID");
     const timestamp = c.req.header("x-timestamp") || c.req.header("X-Timestamp");
     const signature = c.req.header("x-signature") || c.req.header("X-Signature");
@@ -47,7 +45,6 @@ botApiRouter.use("*", async (c, next) => {
     return c.json({ error: "Unauthorized admin access" }, 401);
   }
 
-  // Bot API HMAC-SHA256 Signature Verification
   const botId = c.req.header("x-bot-id") || c.req.header("X-Bot-ID");
   const timestamp = c.req.header("x-timestamp") || c.req.header("X-Timestamp");
   const signature = c.req.header("x-signature") || c.req.header("X-Signature");
@@ -77,19 +74,18 @@ botApiRouter.use("*", async (c, next) => {
 // 1. GET /products
 botApiRouter.get("/products", async (c) => {
   try {
-    const res = await fetch(`${getKryzNetApiUrl()}/api/v1/public/games`).catch(() => null);
-    if (res && res.ok) {
-      const data = (await res.json().catch(() => null)) as Record<string, unknown> | null;
-      const productsList = Array.isArray((data as any)?.data)
-        ? (data as any).data
-        : Array.isArray((data as any)?.games)
-        ? (data as any).games
-        : Array.isArray(data)
-        ? data
-        : [];
-      return c.json({ success: true, products: productsList });
-    }
-    return c.json({ success: true, products: [] });
+    const data = await fetchKryzNetV2<any>("/games").catch(() => null);
+    const products = (data?.games || []).map((g: any) => ({
+      id: g.slug,
+      name: g.name,
+      icon: g.icon || "",
+      type: g.type || "game",
+      fulfillment_type: g.fulfillment_type || "auto",
+      input_schema: g.input_schema || null,
+      description: g.description || "",
+      total_services: g.total_services || 0,
+    }));
+    return c.json({ success: true, products });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Unknown error";
     return c.json({ success: false, error: message }, 500);
@@ -108,19 +104,15 @@ const handleValidateAccount = async (c: Context) => {
       return c.json({ success: false, nickname: null, error: "game_slug and player_id are required" }, 400);
     }
 
-    const res = await fetch(`${getKryzNetApiUrl()}/api/v1/validate-account`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-api-key": getKryzNetApiKey() },
-      body: JSON.stringify({ game_slug, player_id, zone_id }),
-    }).catch(() => null);
-
-    const data = res ? ((await res.json().catch(() => null)) as any) : null;
-
-    if (res && res.ok && data && (data.success || data.nickname)) {
-      return c.json({ success: true, nickname: data.nickname || data.data?.nickname || "ProPlayer_99" });
+    try {
+      const data = await fetchKryzNetV2<any>("/validate-account", {
+        method: "POST",
+        body: JSON.stringify({ game_slug, player_id, zone_id }),
+      });
+      return c.json({ success: true, nickname: data.nickname || "Player" });
+    } catch {
+      return c.json({ success: false, nickname: null, error: "Unable to validate account" }, 400);
     }
-
-    return c.json({ success: true, nickname: data?.nickname || data?.data?.nickname || "ProPlayer_99" });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Unknown error";
     return c.json({ success: false, nickname: null, error: message }, 500);
@@ -156,33 +148,47 @@ botApiRouter.post("/order/create", async (c) => {
       return c.json({ success: false, error: errorMsg, message }, 400);
     }
 
-    // Call Kryz-Net provider
     const idempotencyKey = crypto.randomUUID();
     let providerRes: any = null;
+    let providerOrderId = "";
 
     try {
-      const pRes = await fetch(`${getKryzNetApiUrl()}/api/v1/orders`, {
+      providerRes = await fetchKryzNetV2<any>("/order", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": getKryzNetApiKey(),
-          "Idempotency-Key": idempotencyKey,
-        },
-        body: JSON.stringify({ service_id: product_id || "srv-1", target_id: player_id || "12345678", zone_id: zone_id || "" }),
+        headers: { "Idempotency-Key": idempotencyKey },
+        body: JSON.stringify({ product_id: product_id || "srv-1", player_id: player_id || "12345678", server_id: zone_id || "" }),
       });
-      providerRes = await pRes.json().catch(() => ({ status: "Processing" }));
-    } catch {
-      providerRes = { status: "Processing" };
+      providerOrderId = providerRes?.order_id || "";
+    } catch (err: any) {
+      // Refund local wallet on provider failure
+      if (user_id) {
+        try { await supabase.rpc("increment_balance", {
+          p_user_id: user_id,
+          p_amount: orderAmount,
+          p_reason: `Refund: Provider failed ${refId}`,
+        }); } catch {}
+      }
+      await supabase.from("transactions").update({ status: "Failed", updated_at: new Date().toISOString() }).eq("reference_id", refId);
+      await supabase.from("provider_orders").update({ status: "Failed", updated_at: new Date().toISOString() }).eq("internal_transaction_id", refId);
+      return c.json({ success: false, error: "PROVIDER_ERROR", message: err.message || "Provider order failed" }, 500);
     }
-
-    const providerOrderId = providerRes?.order_id || providerRes?.id || providerRes?.data?.id || `ORD-${Math.floor(10000 + Math.random() * 90000)}`;
 
     await supabase
       .from("provider_orders")
       .update({ provider_order_id: providerOrderId, response_payload: providerRes, updated_at: new Date().toISOString() })
       .eq("internal_transaction_id", refId);
 
-    return c.json({ success: true, reference_id: refId, provider_order_id: providerOrderId, status: "Processing", message: "Pesanan berjaya dihantar ke supplier." });
+    if (providerOrderId) {
+      await supabase.from("transactions").update({ status: "Processing", updated_at: new Date().toISOString() }).eq("reference_id", refId);
+    }
+
+    return c.json({
+      success: true,
+      reference_id: refId,
+      provider_order_id: providerOrderId,
+      status: providerOrderId ? "Processing" : "Failed",
+      message: providerOrderId ? "Pesanan berjaya dihantar ke supplier." : "Pesanan gagal.",
+    });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Unknown error";
     return c.json({ success: false, error: message }, 500);
@@ -201,21 +207,34 @@ botApiRouter.get("/order/status/:id", async (c) => {
     const { data: pOrder } = await supabase.from("provider_orders").select("*").eq("internal_transaction_id", refId).maybeSingle();
     let currentStatus = (tx as any).status || "Processing";
 
-    if (currentStatus === "Processing" && (pOrder as any)?.provider_order_id) {
+    if ((pOrder as any)?.provider_order_id) {
       try {
-        const res = await fetch(`${getKryzNetApiUrl()}/api/v1/orders/${(pOrder as any).provider_order_id}/status`, {
-          headers: { "x-api-key": getKryzNetApiKey() },
-        });
-        if (res.ok) {
-          const statusData = (await res.json().catch(() => null)) as any;
-          const newStatus = statusData?.status || statusData?.data?.status;
-          if (newStatus && newStatus !== currentStatus) {
+        const statusData = await fetchKryzNetV2<any>(`/order/${(pOrder as any).provider_order_id}`);
+        const v2Status = statusData?.status;
+        if (v2Status) {
+          const sl = (v2Status || "").toLowerCase();
+          let newStatus = currentStatus;
+          if (["sukses", "success", "delivered", "paid", "completed"].includes(sl)) newStatus = "Success";
+          else if (["proses", "processing"].includes(sl)) newStatus = "Processing";
+          else if (["gagal", "failed", "refund", "refunded", "cancelled", "error"].includes(sl)) newStatus = "Failed";
+          else if (["pending", "menunggu"].includes(sl)) newStatus = "Pending";
+
+          if (newStatus !== currentStatus) {
             currentStatus = newStatus;
             await supabase.from("transactions").update({ status: newStatus, updated_at: new Date().toISOString() }).eq("reference_id", refId);
             await supabase.from("provider_orders").update({ status: newStatus, updated_at: new Date().toISOString() }).eq("internal_transaction_id", refId);
+
+            // Auto-refund on failure
+            if (newStatus === "Failed" && (tx as any).user_id) {
+              try { await supabase.rpc("increment_balance", {
+                p_user_id: (tx as any).user_id,
+                p_amount: parseFloat((tx as any).amount || 0),
+                p_reason: `Refund: Order ${refId} failed`,
+              }); } catch {}
+            }
           }
         }
-      } catch { /* fallback to current status */ }
+      } catch {}
     }
 
     return c.json({
@@ -307,9 +326,9 @@ botApiRouter.post("/auth/otp/send", async (c) => {
     const expiry = new Date(Date.now() + 300 * 1000).toISOString();
 
     await supabase.from("otp").insert({ user_id: user_id || null, phone, otp_code: otpCode, purpose: purpose || "REGISTER", expiry, verified: false });
-    console.log(`[OTP LOG] Code for ${phone}: ${otpCode}`);
+    console.log(`[OTP] Code sent to ${phone}`);
 
-    return c.json({ success: true, message: "OTP sent", expires_in: 300, test_code: otpCode });
+    return c.json({ success: true, message: "OTP sent", expires_in: 300 });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Unknown error";
     return c.json({ success: false, error: message }, 500);
@@ -384,19 +403,11 @@ botApiRouter.post("/admin/refund", async (c) => {
 // 10. GET /admin/provider/balance
 botApiRouter.get("/admin/provider/balance", async (c) => {
   try {
-    let balanceMyr = 500;
+    let balanceMyr = 0;
     try {
-      let res = await fetch(`${getKryzNetApiUrl()}/api/v1/provider/balance`, { headers: { "x-api-key": getKryzNetApiKey() } }).catch(() => null);
-      if (!res || !res.ok) {
-        res = await fetch(`${getKryzNetApiUrl()}/api/v1/profile`, { headers: { "x-api-key": getKryzNetApiKey() } }).catch(() => null);
-      }
-      if (res && res.ok) {
-        const data = (await res.json().catch(() => null)) as any;
-        if (data && (data.balance_myr !== undefined || data.balance !== undefined)) {
-          balanceMyr = parseFloat(data.balance_myr ?? data.balance ?? 500);
-        }
-      }
-    } catch { /* graceful fallback */ }
+      const profile = await fetchKryzNetV2<any>("/profile");
+      balanceMyr = profile.balance_myr || 0;
+    } catch {}
 
     return c.json({ success: true, provider: "Kryz-Net", balance_myr: balanceMyr, is_low: balanceMyr < 50, alert: balanceMyr < 50 ? "LOW_BALANCE" : "OK" });
   } catch (err: unknown) {
@@ -411,32 +422,23 @@ botApiRouter.post("/cron/products-sync", async (c) => {
     const supabase = getSupabase();
     let syncedCount = 0;
 
-    let res = await fetch(`${getKryzNetApiUrl()}/api/v1/products`, { headers: { "x-api-key": getKryzNetApiKey() } }).catch(() => null);
-    if (!res || !res.ok) {
-      res = await fetch(`${getKryzNetApiUrl()}/api/v1/public/games`, { headers: { "x-api-key": getKryzNetApiKey() } }).catch(() => null);
-    }
+    const data = await fetchKryzNetV2<any>("/products").catch(() => null);
+    if (data && data.products) {
+      const productsToUpsert = data.products.map((p: any) => ({
+        id: p.id || p.code || `prod-${Math.random().toString(36).substring(7)}`,
+        name: p.name || "Game Product",
+        code: p.code || "",
+        brand: p.brand || "",
+        provider_product_id: p.id || "",
+        price_myr: parseFloat(p.price_myr || 10),
+        price_idr: parseFloat(p.price_idr || 0),
+        status: "active",
+        updated_at: new Date().toISOString(),
+      }));
 
-    if (res && res.ok) {
-      const data = (await res.json().catch(() => null)) as any;
-      const rawProducts = Array.isArray(data?.products) ? data.products : Array.isArray(data?.data) ? data.data : Array.isArray(data?.games) ? data.games : Array.isArray(data) ? data : [];
-
-      if (rawProducts.length > 0) {
-        const productsToUpsert = rawProducts.map((p: any) => ({
-          id: p.id || p.service_id || p.slug || `prod-${Math.random().toString(36).substring(7)}`,
-          name: p.name || p.title || p.game_name || "Game Product",
-          code: p.code || p.slug || "",
-          brand: p.brand || p.game || "",
-          provider_product_id: p.id || p.service_id || "",
-          price_myr: parseFloat(p.price_myr || p.price || 10),
-          price_idr: parseFloat(p.price_idr || 0),
-          status: p.status || "active",
-          updated_at: new Date().toISOString(),
-        }));
-
-        const { data: upsertData, error: upsertErr } = await supabase.from("products").upsert(productsToUpsert, { onConflict: "id" }).select();
-        if (!upsertErr && upsertData) syncedCount = Array.isArray(upsertData) ? upsertData.length : productsToUpsert.length;
-        else syncedCount = productsToUpsert.length;
-      }
+      const { data: upsertData, error: upsertErr } = await supabase.from("products").upsert(productsToUpsert, { onConflict: "id" }).select();
+      if (!upsertErr && upsertData) syncedCount = Array.isArray(upsertData) ? upsertData.length : productsToUpsert.length;
+      else syncedCount = productsToUpsert.length;
     }
 
     return c.json({ success: true, count: syncedCount, message: "Products synced successfully." });
