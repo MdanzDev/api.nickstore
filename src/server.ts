@@ -74,11 +74,12 @@ app.all("/api/callback", async (c) => {
 // --- Cron Jobs ---
 app.route("/api/cron", cronRouter);
 
+// --- V1 API Proxy to Kryz-Net (registered BEFORE bot-api so the
+//     bot HMAC middleware never intercepts /api/v1/* requests) ---
+app.route("/api/v1", proxyRouter);
+
 // --- Bot REST API & Admin Endpoints ---
 app.route("/api", botApiRouter);
-
-// --- V1 API Proxy to Kryz-Net (must come AFTER bot-api) ---
-app.route("/api/v1", proxyRouter);
 
 // --- Catch-all ---
 app.all("/api/*", (c) => c.json({ error: "Not Found" }, 404));

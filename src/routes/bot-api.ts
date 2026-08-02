@@ -11,6 +11,25 @@ botApiRouter.use("*", async (c, next) => {
   const botSecret = getBotSecret();
   const adminSecret = getAdminSecret();
 
+  // Only intercept requests that belong to the bot API; all other /api/* paths
+  // (the /api/v1/* Express proxy, cron, webhook) pass through.
+  const botPath = path.replace(/^\/api/, "") || "/";
+  const isBotApiPath =
+    botPath === "/products" ||
+    botPath.startsWith("/products/") ||
+    botPath === "/account/validate" ||
+    botPath === "/v1/validate-account" ||
+    botPath.startsWith("/order/") ||
+    botPath.startsWith("/user/") ||
+    botPath.startsWith("/auth/otp/") ||
+    botPath.startsWith("/admin/refund") ||
+    botPath === "/admin/provider/balance" ||
+    botPath.startsWith("/cron/products-sync");
+
+  if (!isBotApiPath) {
+    return next();
+  }
+
   if (path.includes("/products") || path.includes("/auth") || path.includes("/cron")) {
     return next();
   }
